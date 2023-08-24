@@ -1,0 +1,77 @@
+---
+title: "SSA"
+author: "Redkokosh Kirill"
+date: "3/12/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(Rssa)
+library(TCIApathfinder)
+print.ssa <- function(x, digits = max(3, getOption("digits") - 3), ...) {
+  clp <- (if (length(x$window) > 1) " x " else ", ")
+  cat("\nCall:\n", deparse(x$call), "\n\n", sep="");
+  cat("Series length:", paste(x$length, collapse = clp));
+  cat(",\tWindow length:", paste(x$window, collapse = " x "));
+  cat(",\tSVD method:", x$svd.method);
+  cat("\nSpecial triples: ", nspecial(x));
+  cat("\n\nComputed:\n");
+  cat("Eigenvalues:", nsigma(x));
+  cat(",\tEigenvectors:", nu(x));
+  cat(",\tFactor vectors:", nv(x));
+  cat("\n\nPrecached:",
+      length(.get.series.info(x)),
+      "elementary series (")
+  cat(format(.object.size(x, pat = "series:") / 1024 / 1024, digits = digits),
+      "MiB)");
+  cat("\n\nOverall memory consumption (estimate):",
+      format(.object.size(x) / 1024 / 1024, digits = digits),
+      "MiB");
+  cat("\n");
+  invisible(x);
+}
+
+summary.ssa <- function(object, digits = max(3, getOption("digits") - 3), ...)
+  print.ssa(x = object, digits = digits, ...)
+```
+
+```{r, include=FALSE}
+ts <- read.csv("MRTSSM4453USN.csv", header = TRUE, as.is = FALSE, sep = ',')[1:336,1:2]
+ts[,1] <- c(0:335)
+ts1 <- ts(ts[,2], start = c(1992, 1), frequency = 12)
+plot.ts(ts1, type = 'l')
+ssa.result <- ssa(ts1, L=12)
+plot(ssa.result, type = 'vectors')
+plot(ssa.result, type = 'paired')
+#plot(ssa.result, type = 'series')
+plot(ssa.result, type = 'wcor', idx=2:16)
+ssa.rec.trend <- reconstruct(ssa.result, groups = list(Trend = 1, Season1 = c(2, 3), Season2 = c(4, 5), Season3 = 6, Season4 = 7, Season5 = c(8, 9)))
+plot(ssa.rec.trend)
+parestimate(ssa.result, group=list(), method='pairs')
+```
+
+```{r}
+plot.ts(ts1, type = 'l')
+spectrum(ts1, log='no', method='pgram')
+ssa.result <- ssa(ts1, L=336/2)
+plot(ssa.result, type = 'vectors', idx = 1:20)
+plot(ssa.result, type = 'paired', idx = 2:20)
+plot(ssa.result, type = 'series', groups = 1:20)
+plot(ssa.result, type = 'series', groups = list(1:20))
+plot(ssa.result, type = 'wcor', groups = 1:20)
+parestimate(ssa.result, group=list(2:12))
+ssa.rec.trend <- reconstruct(ssa.result, groups = list(Trend = c(1,13:15,18), Season1 = c(2, 3), Season2 = c(4, 5), Season3 = c(6, 7), Season4 = c(8, 9), Season5 = c(10, 11), Season6 = 12))
+plot.ts(ts1, type = 'l')
+lines(ssa.rec.trend$Trend, col='green')
+plot(ssa.rec.trend)
+spectrum(attr(ssa.rec.trend,"residuals"), log='no', method='pgram')
+ssa.rec.trend <- reconstruct(ssa.result, groups = list(Trend = c(1,13:15,18), Season1 = 2:12))
+plot(ssa.rec.trend)
+spectrum(attr(ssa.rec.trend,"residuals"), log='no', method='pgram')
+plot.ts(ts1, type = 'l')
+lines(ssa.rec.trend$Trend, col='green')
+```

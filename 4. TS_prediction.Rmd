@@ -1,0 +1,213 @@
+---
+title: "Time_Ser"
+author: "Redkokosh Kirill"
+date: '2023-02-18'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(SiZer)
+library(Rssa)
+library(prophet)
+library(Metrics)
+library(randomForest)
+set.seed(11)
+```
+
+Смоделируем броуновское движение как накопительную сумму белого шума.
+
+```{r}
+N <- 1000 #количество реализаций
+n <- 1250 #число точек
+train <- 750 #размер train выборки
+val <- 250 #размер val выборки
+test <- 250 #размер test выборки
+sd <- 0.5 #для броуновского движения
+mean <- 0 #для броуновского движения
+ts_white_noise <- ts(rnorm(n, mean = mean, sd = sd)) #cumsum белого шума -- броуновское движение
+plot(ts_white_noise, type = 'l')
+err_last_1 <- 0
+err_last_2 <- 0
+err_last_3 <- 0
+```
+
+Смоделируем кусочно-линейную функцию как накопительную сумму констант с разрывами, где время между разрывами распределено экспоненциально.
+
+```{r}
+round <- 5
+lambda <- round/n
+mean_a <- 0
+sd_a <- 0.3
+cuts <- numeric()
+i <- 1
+cuts[i] <- as.integer(rexp(1, rate = lambda))
+tmp <- while (cuts[i] + (s_i <- as.integer(rexp(1, rate = lambda))) < n){
+  cuts[i + 1] <- cuts[i] + s_i
+  i <- i + 1
+}
+a <- rnorm(length(cuts), mean = mean_a, sd = sd_a)
+fx <- a[findInterval(1:n, c(-Inf, cuts[1:(round-1)]))]
+plot(fx)
+```
+
+Рассмотри три случая:
+
+1)  Кусочно-линейную функцию
+
+2)  Броуновское движение
+
+3)  Кусочно-линейную функцию + броуновское движение
+
+```{r}
+ts_br <- ts(cumsum(ts_white_noise)) #броуновское движение
+ts_lin <- ts(cumsum(fx)) #кусочно-линейная функция
+ts_mod <- ts(cumsum(fx+ts_white_noise)) #кусочно-линейная функция + броуновское движение 
+plot(ts_mod, type = 'l')
+lines(ts_lin, type = 'l', col = 'green')
+```
+
+Прогноз по последнему-- err_last; прогноз при знании a (в случае броуновского движения совпадает с прогнозом по последней точке)-- err_a; прогноз траекторной матрице-- err_tr:
+
+```{r}
+err_last_1 <- numeric() #кусочно-линейная функцию
+err_last_2 <- numeric() #броуновское движение
+err_last_3 <- numeric() #кусочно-линейная функция + броуновское движение 
+err_a_1 <- numeric() #кусочно-линейная функцию
+err_a_2 <- numeric()
+err_a_3 <- numeric()
+err_bias_1 <- numeric() #кусочно-линейная функцию
+err_bias_2 <- numeric()
+err_bias_3 <- numeric()
+err_forest <- numeric()
+m_optim <- numeric()
+for (i in 1:N){
+  ts_white_noise <- ts(rnorm(n, mean = mean, sd = sd)) #генерация всех рядов
+  cuts <- numeric()
+  k <- 1
+  cuts[k] <- as.integer(rexp(1, rate = lambda))
+  tmp <- while (cuts[k] + (s_k <- as.integer(rexp(1, rate = lambda))) < n){
+    cuts[k + 1] <- cuts[k] + s_k
+    k <- k + 1
+  }
+  a <- rnorm(length(cuts)+1, mean = mean_a, sd = sd_a)
+  fx <- a[findInterval(1:n, c(-Inf, cuts[1:(length(cuts))]))]
+  ts_br <- ts(cumsum(ts_white_noise))
+  ts_lin <- ts(cumsum(fx))
+  ts_mod <- ts(cumsum(fx+ts_white_noise))
+  err_optim <- 100000
+  m_optim[i] <- 0
+  for (M in 2:50){ #M-- последние M точек участвуют в определении смещения
+    err <- 0  
+    for (j in ((train+1):(train+val))){ #подбираем M на validation выборке (подбираем для третьего случая)
+      bias <- (ts_mod[j-1] - ts_mod[j-M])/(M-1)
+      err <- err + (ts_mod[j-1] + bias - ts_mod[j])**2
+    }
+    if (err < err_optim){
+      err_optim <- err
+      m_optim[i] <- M #выбираем M с минимальной ошибкой
+    }
+  }
+  best_l <- 0
+  best_n_tr <- 0
+  err_mse <- 1000000
+  for (l in c(2, 3, 5, 10, 20, 50, 100, train/3, train/2)){ # на validation перебираем "размер окна"
+    for (n_tr in c(50, 100, 500)){ # на validation перебираем количество деревьев 
+      lag_order <- l
+      diff_ts <- diff(c(ts_mod[1], ts_mod[1:(train+val)])) # приводим ряд к стацинарному виду, первое значение ряда в начале, чтобы размерность не изменялась при дифференцировании
+      tax_ts_mbd <- embed(diff_ts, lag_order + 1) # для создания повтроности строим тёплицеву матрицу, где первый столбец соответсвует последнему отрезку ряда длинной N-lag_order (столбцов lag_order + 1)
+      y_train <- tax_ts_mbd[, 1] # первый столбец-- целевой вектор
+      X_train <- tax_ts_mbd[, -1] # все остальное-- обучайщий набор
+      y_val <- ts_mod[(train+1):(train+val)] #ответ, с которым будем сверять
+      set.seed(1)
+      forecasts_rf <- numeric(val)
+      fit_rf <- randomForest(X_train, y_train, ntree = n_tr) # строим лес
+      for (i in 1:val){
+        forecasts_rf[i] <- predict(fit_rf, rev(y_train)[1:lag_order])
+        y_train <- c(y_train[-1], diff_ts[train+i])
+      }
+      mse_now <- mse(ts_mod[train] + cumsum(forecasts_rf), y_val)
+      if(mse_now < err_mse){
+        err_mse <- mse_now
+        best_l <- l
+        best_n_tr <- n_tr
+      }
+    }
+  }
+  lag_order <- best_l
+  diff_ts <- diff(c(0, ts_mod)) 
+  tax_ts_mbd <- embed(diff_ts, lag_order + 1) 
+  y_train <- tax_ts_mbd[, 1] 
+  X_train <- tax_ts_mbd[, -1] 
+  set.seed(1)
+  forecasts_rf <- numeric(val)
+  fit_rf <- randomForest(X_train, y_train, ntree = best_n_tr)
+  err_last_1[i] <- 0
+  err_last_2[i] <- 0
+  err_last_3[i] <- 0
+  err_a_1[i] <- 0
+  err_a_2[i] <- 0
+  err_a_3[i] <- 0
+  err_bias_1[i] <- 0
+  err_bias_2[i] <- 0
+  err_bias_3[i] <- 0
+  err_forest[i] <- 0
+  for (j in ((train+val+2):n)){ # предсказываем на одну точку вперед для всех случаев
+    err_last_1[i] <- err_last_1[i] + (ts_lin[j-1]-ts_lin[j])**2
+    err_last_2[i] <- err_last_2[i] + (ts_br[j-1]-ts_br[j])**2
+    err_last_3[i] <- err_last_3[i] + (ts_mod[j-1]-ts_mod[j])**2
+    err_a_1[i] <- err_a_1[i] + (ts_lin[j-1]+fx[j]-ts_lin[j])**2
+    err_a_2[i] <- err_a_2[i] + (ts_br[j-1]+0-ts_br[j])**2
+    err_a_3[i] <- err_a_3[i] + (ts_mod[j-1]+fx[j]-ts_mod[j])**2
+    bias_1 <- (ts_lin[j-1] - ts_lin[j-m_optim[i]])/(m_optim[i]-1)
+    bias_2 <- (ts_br[j-1] - ts_br[j-m_optim[i]])/(m_optim[i]-1)
+    bias_3 <- (ts_mod[j-1] - ts_mod[j-m_optim[i]])/(m_optim[i]-1)
+    err_bias_1[i] <- err_bias_1[i] + (ts_lin[j-1] + bias_1 - ts_lin[j])**2
+    err_bias_2[i] <- err_bias_2[i] + (ts_br[j-1] + bias_2 - ts_br[j])**2
+    err_bias_3[i] <- err_bias_3[i] + (ts_mod[j-1] + bias_3 - ts_mod[j])**2
+    err_forest[i] <- err_forest[i] + (predict(fit_rf, rev(y_train)[1:lag_order]) - ts_mod[j])**2 
+    y_train <- c(y_train[-1], diff_ts[j-2])
+  }
+  err_last_1[i] <- err_last_1[i]/test # усредняем результаты 
+  err_last_2[i] <- err_last_2[i]/test
+  err_last_3[i] <- err_last_3[i]/test
+  err_a_1[i] <- err_a_1[i]/test
+  err_a_2[i] <- err_a_2[i]/test
+  err_a_3[i] <- err_a_3[i]/test
+  err_bias_1[i] <- err_bias_1[i]/test
+  err_bias_2[i] <- err_bias_2[i]/test
+  err_bias_3[i] <- err_bias_3[i]/test
+  err_forest[i] <- err_forest[i]/test
+}
+```
+
+```{r}
+t_last <- t.test(err_last_3, conf.level = 0.95) #строим доверительные интервалы для случая кусочно-линейной функции + броуновское движение
+t_a <- t.test(err_a_3, conf.level = 0.95)
+t_bias <- t.test(err_bias_3, conf.level = 0.95)
+t_forest <- t.test(err_forest, conf.level = 0.95)
+print(c('Нижняя граница', sd**2))
+print(c('По последнему:', mean(err_last_1), mean(err_last_2), mean(err_last_3)))
+print(c('По а:', mean(err_a_1), mean(err_a_2), mean(err_a_3)))
+print(c('По M:', mean(err_bias_1), mean(err_bias_2), mean(err_bias_3)))
+print(c('Forest', mean(err_forest)))
+print(c('Верхняя граница', sd**2+sd_a**2))
+print(c('Доверительный интервал для третьего случая (предсказание по последнему)', t_last$conf[1], t_last$conf[2]))
+print(c('Доверительный интервал для третьего случая (предсказание по a)', t_a$conf[1], t_a$conf[2]))
+print(c('Доверительный интервал для третьего случая (предсказание по M)', t_bias$conf[1], t_bias$conf[2]))
+print(c('Доверительный интервал для третьего случая (предсказание случайным лесом)', t_forest$conf[1], t_forest$conf[2]))
+```
+В случае предсказания по последнему (что совпадает с прогнозом по а) для броуновского движения ≈ $\sigma^2$, для кусочно-линейного ≈ $\sigma_а^2$, для их суммы ≈ $\sigma^2+\sigma_а^2$.
+
+Прогноз по а для кусочно-линейного = 0, для кусочно-линейной функции + броуновского движения ≈ $\sigma^2$.
+
+Прогноз по М для суммы показывает результат лучше, чем по последнему, но хуже чем при инсайдах, при этом доверительный интервал лежит между $\sigma^2$ и $\sigma^2+\sigma_а^2$.
+
+Прогноз случайным лесом лучше чем по последнему и доверительный интервал лежит между $\sigma^2$ и $\sigma^2+\sigma_а^2$.
+
+И для всех способов прогнозирования мы не смогли спрогнозировать с ошибкой меньше $\sigma^2$.

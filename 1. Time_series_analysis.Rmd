@@ -1,0 +1,1159 @@
+---
+title: "TimeSer"
+author: "Redkokosh Kirill"
+date: "2/24/2022"
+output:
+  html_document:
+    toc: true
+    toc_float: yes
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, results='hide', include=FALSE}
+library(astrochron)
+library(pracma)
+library(mFilter)
+library(Rssa)
+library(gplots)
+library(Metrics)
+library(plyr)
+set.seed(1)
+```
+
+# Периодограммы
+
+## Реальные данные
+
+Считываем данные, строим исходный ряд и его периодограмму.
+
+```{r}
+ts_data <- read.csv("MRTSSM4453USN.csv", header = TRUE, as.is = FALSE, sep = ',')[,1:2]
+ts_data[,1] <- c(0:359)
+ts1 <- ts_data[1:336,]
+ts <- ts(ts_data[,2], start = c(1992, 1), frequency = 12)
+ts1 <- ts(ts1[,2], start = c(1992, 1), frequency = 12)
+ts2 <- ts(ts1[c(1:54)], start = c(1992, 1), frequency = 12)
+plot.ts(ts1, type = 'l')
+spectrum(ts1, log='no', method='pgram', detrend=FALSE)
+spectrum(ts1, log='no', method='pgram')
+```
+
+На периодограмме все частоты имеют значительный вклад, в том числе присутствует частота 1/2 (6/12), то есть, возможно, мы встретим "пилу".
+
+## Белый шум
+
+Также продемонструруем периодограмму белого шума.
+
+```{r}
+data <- rnorm(1000, 0, 1)
+plot.ts(data, type="l")
+spectrum(data, log='no')
+spectrum(data, log='no', taper=0)
+```
+
+```{r, include=FALSE}
+N <- 9600
+x <- 0.1*cos(2*pi/12*(1:N))+rnorm(N)
+ser <- ts(x, frequency = 12, start = c(1959, 1))
+plot(ser, type = 'l')
+spectrum(ser, log='no', method='pgram')
+```
+
+# Частотные фильтры
+
+## Bandpass
+
+Построим ряд, его периодограмму и применим фильтр для подавления частот вне диапазона 0.2--0.45.
+
+```{r}
+plot.ts(ts1, type = 'l')
+spectrum(ts1, log='no', method='pgram')
+ts_data[1:336,]
+bandpass_ts <- bandpass(ts_data[1:336,],fhigh=0.45,flow=0.05,win=2,p=.05,detrend = FALSE)
+ts_b <- ts(bandpass_ts[,2], start = c(1992, 1), frequency = 12)
+plot.ts(bandpass_ts[,2], type = 'l')
+spectrum(ts_b, log='no', method='pgram')
+```
+
+Полученный ряд не имеет линейного тренда, так как тренд соответствует низким частотам, а также отсутствует гармоника с частотой 1/2 ($(-1)^n$).
+
+## АЧХ
+
+Построим АЧХ для нескольких фильтров:
+
+```{r}
+afc <- function(filter, omega) {
+k <- seq_along(filter) - 1
+h <- function(o) sum(rev(filter) * exp(-k*1i * o)) 
+abs(sapply(omega, h))
+}
+
+freq <- seq(0, pi, 0.001)
+filt <- rep(1, 36)
+omega <- freq/2/pi
+plot(afc(filt, freq) ~ omega, type = 'l')
+filt <- c(1,-1)
+plot(afc(filt, freq) ~ omega, type = 'l')
+```
+
+Первый для скользящего среднего с окном 36, второй-- переход к разностям.
+
+Смоделируем сильно зашумленный ряд и попробуем выделить необходимую частоту.
+
+```{r, include=FALSE}
+N <- 10900
+x <- 0.1*cos(2*pi/12*(1:N))+rnorm(N)
+ser <- ts(x, frequency = 12, start = c(1959, 1))
+plot(ser, type = 'l')
+spectrum(ser, log='no', method='pgram')
+bandpass_ts1 <- bandpass(cbind(c(0:N-1), x),flow=0.07,fhigh=0.1,win=1,detrend = TRUE)
+ts_b1 <- ts(bandpass_ts1[,2], start = c(1992, 1), frequency = 12)
+plot.ts(bandpass_ts1[,2], type = 'l')
+spectrum(ts_b1, log='no', method='pgram')
+```
+
+## Спектральная плотность
+
+Применим скользящее среднее к периодограмме шума, для оценки спектральной плотности:
+
+```{r}
+n <- 200
+N <- 1000
+wnoise <- rnorm(N, 0, 1)
+plot.ts(wnoise, type="l")
+B <- spectrum(wnoise, log='no', taper=0, plot=FALSE)
+plot(B$freq, B$spec, type='l')
+lines(B$freq, movavg(B$spec, n, type='t'), type = 'l', col = 'red')
+#spectrum(wnoise, kernel = kernel("daniell", c(11,7,3)), log = "no")
+#bandpass_ts2 <- bandpass(cbind(c(0:N-1), wnoise),flow=0.2,fhigh=0.5,win=2,p=.5,detrend = TRUE)
+#ts_b2 <- ts(bandpass_ts2[,2], start = c(1992, 1), frequency = 12)
+#plot.ts(bandpass_ts2[,2], type = 'l')
+#spectrum(ts_b2, log='no', method='pgram')
+```
+
+Для белого шума получается константа.
+
+```{r}
+w0 <- wnoise[1]
+wnoise <- wnoise[2:N]
+cor <- 0.8
+rnoise = Reduce(function(prev_v, next_v) cor * prev_v + next_v * sqrt(1 - cor^2), wnoise, w0, accumulate = T)
+```
+
+```{r}
+plot.ts(rnoise, type="l")
+B <- spectrum(rnoise, log='no', taper=0, plot=FALSE)
+plot(B$freq, B$spec, type='l')
+lines(B$freq, movavg(B$spec, n, type='t'), type = 'l', col = 'red')
+
+#bandpass_ts3 <- lowpass(cbind(c(0:N-1), rnoise),fcut=.05,win=2,p=.2,detrend = TRUE)
+#ts_b3 <- ts(bandpass_ts3[,2], start = c(1992, 1), frequency = 12)
+#plot.ts(bandpass_ts3[,2], type = 'l')
+#spectrum(ts_b3, log='no', method='pgram')
+```
+
+Для красного шума убывающая кривая.
+
+# Выделение тренда
+
+## Скользящее среднее
+
+Выделение тренда с помощью скользящего среднего с разной длиной окна (берем длину окна, кратную периоду ряда--12):
+
+```{r}
+ma <- function(x, n){filter(x, rep(1 / n, n), sides = 2)}
+plot.ts(ts1, type = 'l')
+lines(x = time(ts1), y = ma(ts1, 24), type = 'l', col = 'blue')
+lines(x = time(ts1), y = ma(ts1, 48), type = 'l', col = 'red')
+```
+
+Недостатком является необходимость достраивать края.
+
+```{r}
+n <- 48
+plot.ts(ts1, type = 'l')
+lines(x = time(ts1), y = movavg(ts1, n, type='t'), type = 'l', col = 'red')
+lines(x = time(ts1), y = ma(ts1, n), type = 'l', col = 'blue')
+```
+
+## HP-фильтр
+
+Применим HP-фильтр с параметром лямбда = 12960.
+
+```{r}
+plot.ts(ts1, type = 'l')
+hp_filt <- hpfilter(ts1, freq=12960, type="lambda")$trend
+lines(hp_filt, type = 'l', col = 'red')
+```
+
+Результат похож на скользящее среднее, но тренд выделен и на краях. Недостаток- сложность подбора параметра.
+
+```{r, include=FALSE}
+plot.ts(ts1, type = 'l')
+lines(hpfilter(ts1, freq=24*2, type="frequency")$trend, type = 'l', col = 'red')
+```
+
+## Параметрические модели
+
+```{r}
+time_ts1 <- time(ts1)
+model <- nls(ts1 ~ b1*time_ts1+b2, start = list(b1 = 1, b2 = 3))
+plot.ts(ts1, type = 'l')
+lines(x = time_ts1, y = predict(model, ts1), type = 'l', col = 'red')
+```
+
+Приближение многочленом первой степени плохо описывает поведение на краях.
+
+```{r}
+model <- nls(ts1 ~ b1*time_ts1^2+b2*time_ts1+b3, start = list(b1 = 1, b2 = 3, b3 = 0))
+plot.ts(ts1, type = 'l')
+lines(x = time_ts1, y = predict(model, ts1), type = 'l', col = 'red')
+```
+
+Приближение многочленом второй степени неплохо описывает тренд.
+
+```{r}
+expR <- lm(log(ts1) ~ time(ts1))
+plot.ts(ts1, type = 'l')
+lines(x = time_ts1, y = exp(predict(expR)), type = 'l', col = 'red')
+```
+
+Приближение экспонентой неплохо описывает тренд.
+
+## SSA
+
+Для выделения тренда рассмотрим метод ssa с длиной окна 12.
+
+```{r}
+ssa.result <- ssa(ts1, L=12)
+plot(ssa.result, type = 'vectors', idx=1:12)
+plot(ssa.result, type = 'paired')
+plot(ssa.result, type = 'series')
+plot(ssa.result, type = 'wcor')
+parestimate(ssa.result)
+ssa.rec.trend <- reconstruct(ssa.result, groups = list(Trend = c(1)))
+plot(ssa.rec.trend)
+```
+
+Трендом будем считать только первую компоненту.
+
+```{r}
+plot.ts(ts1, type = 'l')
+lines(ssa.rec.trend$Trend, col='red')
+```
+
+Из рассмотренных методов ssa наилучшим образом справляется с выделением тренда.
+
+## LOWESS
+
+Добавим еще lowess
+
+```{r}
+plot.ts(ts1, type = 'l')
+#lines(lowess(ts1 ~ time(ts1), f=.05, iter=3L), col='green')
+lines(lowess(ts1 ~ time(ts1), f=.1, iter=3), col='blue')
+#lines(lowess(ts1 ~ time(ts1), f=.15, iter=3L), col=4)
+lines(lowess(ts1 ~ time(ts1), f=.2, iter=3), col='red')
+```
+
+Результаты похожи на ssa, сильных отличий при использовании в lowess 10% и 20% точек нет.
+
+# Разложение на тренд, периодику и шум
+
+## Seasonal decomposition
+
+```{r}
+dec_ts1 <- stats::decompose(ts1, type = 'multiplicative')
+plot(ts1, type = 'l')
+lines(dec_ts1$trend, col='red')
+plot(dec_ts1$seasonal)
+plot(dec_ts1$random)
+spectrum(na.omit(dec_ts1$random), log='no', method='pgram', detrend=TRUE)
+```
+
+Полученный тренд неплохо описывает ряд, на периодограмме видно, что в шуме остались гармоники.
+
+## stl
+
+Возьмем t.window=13, при общем количестве периодов 28:
+
+```{r}
+stl_ts1 <- stl(log(ts1), s.window = 5, s.degree = 1, t.window = 13, t.jump = 1, t.degree=1)
+spectrum(stl_ts1$time.series[,3], log='no', method='pgram', detrend=TRUE)
+#acf(stl_ts1$time.series[,3])
+#acf(stl_ts1$time.series[,2])
+#acf(stl_ts1$time.series[,1])
+plot(stl_ts1)
+plot(ts1, type = 'l')
+lines(exp(stl_ts1$time.series[,2]), col='red')
+```
+
+Полученный тренд неплохо описывает ряд, на периодограмме видно, что в шуме остались гармоники.
+
+## SSA
+
+Рассмотрим ssa с максимально возможной длинной окна- половина ряда.
+
+```{r}
+ssa.result <- ssa(ts1, L=336/2)
+plot(ssa.result, type = 'vectors', idx = 1:20)
+plot(ssa.result, type = 'paired', idx = 2:20)
+plot(ssa.result, type = 'series', groups = 1:20)
+plot(ssa.result, type = 'series', groups = list(1:20))
+plot(ssa.result, type = 'wcor', groups = 1:20)
+parestimate(ssa.result, group=list(2:12))
+ssa.rec.trend <- reconstruct(ssa.result, groups = list(Trend = c(1,13:15,18), Seas=c(2:12,16,17,19,20)))
+```
+
+Трендом считаем компоненты- 1, 13, 14, 15, 18; периодикой- 2-12, 16, 17, 19, 20; остальное- шум.
+
+```{r}
+#plot(ssa.rec.trend$Seas)
+plot.ts(ts1, type = 'l')
+lines(ssa.rec.trend$Trend, col='red')
+spectrum(residuals(ssa.rec.trend), log='no', method='pgram', detrend=TRUE)
+acf(residuals(ssa.rec.trend))
+```
+
+Тренд выделен хорошо, остаток похож на красный шум, то есть в шуме не осталось тренда и/или периодик.
+
+# ЛРФ
+
+## Модельный ряд без шума
+
+Модельный ряд, ранг 5 (2 корня от косинуса и 3 от квадратичного тренда).
+
+```{r}
+a <- -1/600
+b <- 12
+c <- 5
+n <- c(1:1000)
+ts_mod <- ts(c*exp(a*n)*sin(2/b*pi*n) + (n/200)^2 + 100)
+plot(ts_mod, type = 'l')
+ts_mod <- ts_mod[1:5]
+for (i in 1:(1000-5)) {
+  ts_mod <- append(ts_mod, exp(2*a)*ts_mod[i]+(-3*exp(2*a)-exp(a)*sqrt(3))*ts_mod[i+1]+(1+3*exp(2*a)+3*sqrt(3)*exp(a))*ts_mod[i+2]+(-3-exp(2*a)-3*sqrt(3)*exp(a))*ts_mod[i+3]+(3+sqrt(3)*exp(a))*ts_mod[i+4])
+}
+lines(ts_mod, type = 'l', col = 'red')
+```
+
+```{r}
+rank <- 5
+ssa <- ssa(ts_mod, L = rank+1, svd.method = 'svd')
+r0 <- reconstruct(ssa, groups = list(signal = 1:rank))$signal
+plot(ssa)
+n_eig <- list(1:rank)
+l <- lrr(ssa, group = n_eig)
+r1 <- Rssa::roots(l)
+r1
+plot(l)
+parestimate(ssa, group = n_eig)
+par <- parestimate(ssa, groups = n_eig, method = "esprit")
+```
+
+Полученные 5 корней изобразили на единичной окружности (1 кратности 3, отвечает за квадратичный тренд).
+
+Решая систему получим коэфициенты ЛРФ и нарисуем ряд на фоне модельного.
+
+```{r}
+p <- (par$moduli[1]+par$moduli[2]+par$moduli[3])/3
+a <- p
+ro <- par$moduli[4]
+w <- 2*pi/(par$periods[4])
+param <- matrix(c(0, 0, 1, 1, 0, 
+                  a, a, a, ro*cos(w), ro*sin(w),
+                  2^2*a^2, 2*a^2, a^2, ro^2*cos(2*w), ro^2*sin(2*w),
+                  3^2*a^3, 3*a^3, a^3, ro^3*cos(3*w), ro^3*sin(3*w),
+                  4^2*a^4, 4*a^4, a^4, ro^4*cos(4*w), ro^4*sin(4*w))
+                  , 5, 5)
+c <- solve(t(param), ts_mod[1:5])
+c
+t <- ts(Re((c[3]+c[2]*n+c[1]*n^2)*a^n+c[4]*ro^n*cos(w*n)+c[5]*ro^n*sin(w*n)))
+plot(t)
+lines(ts_mod, col = 'green')
+```
+
+Полученный ряд хорошо описывает исходный.
+
+## Модельный ряд с шумом
+
+Модельный ряд с шумом, ранг 5 (2 корня от косинуса и 3 от квадратичного тренда).
+
+```{r}
+ts_mod <- ts_mod + rnorm(1000, 0, 0.15)
+plot(ts_mod)
+```
+
+```{r}
+ssa_signal <- ssa(ts_mod, svd.method = 'svd')
+r0 <- reconstruct(ssa_signal, groups = list(signal = 1:rank))$signal
+plot(ssa_signal, type = 'vectors')
+```
+
+В соответсвии с результатми ssa, ранг = 4, видимо задуманный квадратичный тренд был описан комбинацией двух экспонент.
+
+```{r}
+rank <- 4
+n_eig <- list(1:rank)
+l1<- lrr(ssa_signal, group = n_eig)
+r1 <- Rssa::roots(l1)
+main.roots <- r1[Mod(r1) > 0.999]
+
+l2 <- lrr(ssa_signal, reverse = TRUE, group = n_eig)
+r2 <- Rssa::roots(l2)
+main.roots <- c(main.roots, 1/r2[Mod(r2) > 0.999])
+par <- parestimate(ssa_signal, groups = n_eig, method = "esprit")
+```
+
+Отобрали 4 сигнальных корня.
+
+```{r}
+par
+o <- order(abs(par$periods), decreasing = TRUE)
+periods <- (par$periods[o])
+moduli <- par$moduli[o]
+len <- length(ts_mod)
+vars <- matrix(nrow = len, ncol = rank)
+for (i in 1:rank) {
+  if (abs(periods[i]) > 10000)
+    vars[, i] <- moduli[i]^(1:len)
+  else if (periods[i] == 2)
+    vars[, i] <- (-moduli[i])^(1:len)
+  else if (periods[i] > 0)
+    vars[, i] <- 
+      moduli[i]^(1:len) * sin(2 * pi * (1:len) / periods[i])
+  else
+    vars[, i] <- 
+      moduli[i]^(1:len) * cos(2 * pi * (1:len) / periods[i])
+}
+lm0 <- lm(r0[1:len] ~ 0 + ., data = data.frame(vars))
+coefs0 <- coef(lm0)
+coefs0
+```
+
+Нашли коэффициенты ЛРФ, как коэффициенты линейной регрессии.
+
+Нарисуем полученный ряд на фоне модельного.
+
+```{r}
+a1 <- par$moduli[1]
+a2 <- par$moduli[2]
+ro <- par$moduli[3]
+w <- 2*pi/(par$periods[3])
+t <- ts(coefs0[1]*a1^n+coefs0[2]*a2^n+coefs0[4]*ro^n*cos(w*n)+coefs0[3]*ro^n*sin(w*n))
+plot(t)
+lines(ts_mod, col = 'green')
+```
+
+Полученный ряд хорошо описывает исходный.
+
+## Реальные данные
+
+Применим этот подход к реальному ряду.
+
+```{r}
+plot.ts(ts1, type = 'l')
+spectrum(ts1, log='no', method='pgram')
+ssa.result <- ssa(ts1, L=336/2)
+plot(ssa.result, type = 'vectors', idx = 1:20)
+plot(ssa.result, type = 'paired', idx = 2:20)
+plot(ssa.result, type = 'series', groups = 1:20)
+plot(ssa.result, type = 'series', groups = list(1:20))
+plot(ssa.result, type = 'wcor', groups = 1:20)
+```
+
+Ранг равен 15, тренд описывается комбинацией линейной функции и гармоники с большим периодом, сезонность описывается 11 компонентами (пары периодов + "пила").
+
+```{r}
+rank <- 15
+r0 <- reconstruct(ssa.result, groups = list(signal = 1:rank))$signal
+n_eig <- list(1:rank)
+l1<- lrr(ssa.result, group = n_eig)
+r1 <- Rssa::roots(l1)
+main.roots <- r1[Mod(r1) > 0.999]
+
+l2 <- lrr(ssa.result, reverse = TRUE, group = n_eig)
+r2 <- Rssa::roots(l2)
+main.roots <- c(main.roots, 1/r2[Mod(r2) > 0.999])
+main.roots
+plot(main.roots)
+par <- parestimate(ssa.result, groups = n_eig, method = "esprit")
+par
+```
+
+Отобрали сигнальные корни.
+
+```{r}
+p <- (par$moduli[1]+par$moduli[2])/2
+o <- order(abs(par$periods), decreasing = TRUE)
+periods <- (par$periods[o])
+moduli <- par$moduli[o]
+len <- length(ts1)
+vars <- matrix(nrow = len, ncol = rank)
+n <- (1:len)
+for (i in 1:rank) {
+  if (abs(periods[i]) > 1000)
+    vars[, i] <- n^(i-1)*p^n
+  else if (periods[i] == 2)
+    vars[, i] <- (-moduli[i])^n
+  else if (periods[i] > 0)
+    vars[, i] <- 
+      moduli[i]^n * sin(2 * pi * n / periods[i])
+  else
+    vars[, i] <- 
+      moduli[i]^n * cos(2 * pi * n / periods[i])
+}
+lm0 <- lm(r0[1:len] ~ 0 + ., data = data.frame(vars))
+coefs0 <- coef(lm0)
+coefs0
+```
+
+Нашли коэффициенты ЛРФ, как коэффициенты линейной регрессии.
+
+Нарисуем полученный ряд на фоне восстановленного.
+
+```{r}
+ro1 <- par$moduli[7]
+w1 <- 2*pi/(par$periods[7])
+ro2 <- par$moduli[5]
+w2 <- 2*pi/(par$periods[5])
+ro3 <- par$moduli[11]
+w3 <- 2*pi/(par$periods[11])
+ro4 <- par$moduli[3]
+w4 <- 2*pi/(par$periods[3])
+ro5 <- par$moduli[9]
+w5 <- 2*pi/(par$periods[9])
+ro6 <- par$moduli[13]
+w6 <- 2*pi/(par$periods[13])
+ro7 <- par$moduli[15]
+w7 <- 2*pi/(par$periods[15])
+t <- ts((coefs0[1]+coefs0[2]*n)*p^n+
+        coefs0[3]*ro7^n*cos(w7*n)+coefs0[4]*ro7^n*sin(w7*n)+
+        coefs0[5]*ro1^n*cos(w1*n)+coefs0[6]*ro1^n*sin(w1*n)+
+        coefs0[7]*ro2^n*cos(w2*n)+coefs0[8]*ro2^n*sin(w2*n)+
+        coefs0[9]*ro3^n*cos(w3*n)+coefs0[10]*ro3^n*sin(w3*n)+
+        coefs0[11]*ro4^n*sin(w4*n)+coefs0[12]*ro4^n*cos(w4*n)+
+        coefs0[13]*ro5^n*sin(w5*n)+coefs0[14]*ro5^n*cos(w5*n)+
+        coefs0[15]*ro6^n*cos(w6*n)
+        , start = c(1992, 1), frequency = 12)
+plot(r0)
+lines(t, col = 'green')
+plot(ts1)
+lines(t, col = 'red')
+```
+
+Полученный ряд хорошо описывает восстановленный ряд.
+
+# Автоматический выбор трендовых компонент
+
+Для начала зададим число групп, первый вариант-- 4 групп (1 отвечает за тренд и 3 за сезонность), второй вариант-- 6 групп (1 отвечает за тренд и 5 за сезонность),
+
+```{r}
+plot(ssa.result, type = "vectors", idx = 1:20)
+plot(ssa.result, type = "series", groups = 1:20)
+plot(ssa.result, type = "wcor", groups = 1:20)
+
+g <- grouping.auto(ssa.result, freq.bins = 4, threshold = 0)
+plot(reconstruct(ssa.result, groups = g))
+
+g <- grouping.auto(ssa.result, freq.bins = 6, threshold = 0)
+plot(reconstruct(ssa.result, groups = g))
+```
+
+В первом случае в тренд попала сезонность, значит количество групп надо увеличить, во втором случае тренд выделен хорошо.
+
+Второй случай-- зададим freq.bins = 1/(12\*2) (меньше 1/12- самой маленькой возможной частоты из сезонности) и threshold = 0 для определения порога.
+
+```{r, error=FALSE, warning=FALSE}
+g <- grouping.auto(ssa.result, freq.bins = list(Trend = 1/(12*2)), threshold = 0)
+plot(reconstruct(ssa.result, groups = g))
+plot(g, type='b', order = TRUE)
+```
+
+Будем считать компоненты частью тренда при привышении порога в 0.85.
+
+```{r}
+g <- grouping.auto(ssa.result, freq.bins = list(Trend = 1/(12*2)), threshold = 0.85)
+plot(ts1)
+lines(reconstruct(ssa.result, groups = g)$Trend, col='red')
+g$Trend
+```
+
+К тренду отнесены компоненты 1, 13, 14, 15, 18, 31, 32. Тренд выделен хорошо.
+
+# Улучшение разделимости
+
+## fossa
+
+fossa помогает, если есть слабая разделимость, но нет сильной. Здесь смешаны компоненты 13-15.
+
+```{r}
+f <- fossa(ssa.result, nested.group = 13:15)
+
+plot(ssa.result, type = "vectors", idx = 1:15)
+plot(f, type = "vectors", idx = 1:15)
+plot(ssa.result, type = "series", groups = 1:15)
+plot(f, type = "series", groups = 1:15)
+plot(ssa.result, type = "wcor", groups = 1:15)
+plot(f, type = "wcor", groups = 1:15)
+```
+
+Не помогло :(
+
+## iossa
+
+iossa уже и с отсутствием слабой разделимости может справиться. Подаем на вход компоненты, отнесенные к тренду и компоненты, отнесенные к периодике.
+
+```{r}
+g <- list(c(1, 13:15), 2:12)
+issa <- iossa(ssa.result, nested.group = g)
+
+plot(ssa.result, type = "vectors", idx = 1:15)
+plot(issa, type = "vectors", idx = 1:15)
+plot(ssa.result, type = "series", groups = 1:15)
+plot(issa, type = "series", groups = 1:15)
+
+r0 <- reconstruct(issa, groups = issa$iossa.groups)
+plot(r0)
+```
+
+Собственные вектора 13-15 сгладились.
+
+## eossa
+
+eossa также справляется с отсутствием сильной разделимости, на вход подаем количество групп = 8.
+
+```{r}
+e <- eossa(ssa.result, nested.group = g, k = 8)
+
+plot(ssa.result, type = "vectors", idx = 1:15)
+plot(e, type = "vectors", idx = 1:15)
+plot(e, type = "series", groups = e$iossa.groups)
+
+r0 <- reconstruct(e, groups = e$iossa.groups)
+plot(r0)
+```
+
+Собственные вектора 13-15 также сгладились, в группы были объедены компоненты, отвечающие за линейную составлющую тренда, за гармонику с большим периодом из тренда и все периодики из сезонности попарно.
+
+# Прогноз
+
+Рассмотрим два варианта: "отрежем" один и два периода и будем прогнозировать по оставшимся точкам "отрезанные".
+
+```{r}
+ts1s <- ts(ts1[1:324], start = c(1992, 1), frequency = 12)
+ts1s2 <- ts(ts1[1:312], start = c(1992, 1), frequency = 12)
+ssa.result_1 <- ssa(ts1s, L=324/2)
+ssa.result_2 <- ssa(ts1s2, L=312/2)
+plot(ssa.result_1, type = 'vectors', idx = 1:20)
+plot(ssa.result_1, type = 'paired', idx = 2:20)
+plot(ssa.result_1, type = 'series', groups = 1:20)
+plot(ssa.result_1, type = 'series', groups = list(1:20))
+plot(ssa.result_1, type = 'wcor', groups = 1:20)
+plot(ssa.result_2, type = 'vectors', idx = 1:20)
+plot(ssa.result_2, type = 'paired', idx = 2:20)
+plot(ssa.result_2, type = 'series', groups = 1:20)
+plot(ssa.result_2, type = 'series', groups = list(1:20))
+plot(ssa.result_2, type = 'wcor', groups = 1:20)
+```
+
+При "отрезании" одного периода при группировке будем рассматривать 15 компонент.
+
+При "отрезании" двух периодов при группировке будем рассматривать 12 компонент, так как дальше компоненты сильно смешаны.
+
+## Рекуррентный прогноз:
+
+```{r}
+r <- rforecast(ssa.result_1, groups = list(1:15), len = 12)
+plot(ts(c(ts1s,r), start=start(ts1), frequency=frequency(ts1)))
+lines(ts1, col = 'red')
+rec_1 <- rmse(ts1[325:336], r)
+rec_1
+r <- rforecast(ssa.result_2, groups = list(1:12), len = 24)
+plot(ts(c(ts1s2,r), start=start(ts1), frequency=frequency(ts1)))
+lines(ts1, col = 'red')
+rec_2 <- rmse(ts1[313:336], r)
+rec_2
+```
+
+Ошибка рекуррентного прогноза для 1 периода-- 108.92, для 2 периодов-- 134.06.
+
+## Векторный прогноз
+
+```{r}
+v <- vforecast(ssa.result_1, groups = list(1:15), len = 12)
+plot(ts(c(ts1s,v), start=start(ts1), frequency=frequency(ts1)))
+lines(ts1, col = 'red')
+vec_1 <- rmse(ts1[325:336], v)
+vec_1
+v <- vforecast(ssa.result_2, groups = list(1:12), len = 24)
+plot(ts(c(ts1s2,v), start=start(ts1), frequency=frequency(ts1)))
+lines(ts1, col = 'red')
+vec_2 <- rmse(ts1[313:336], v)
+vec_2
+```
+
+Ошибка векторного прогноза для 1 периода-- 85.11, для 2 периодов-- 134.58.
+
+## Bootstrap
+
+1.  Для одного периода:
+
+```{r}
+bf_r <- forecast(ssa.result_1, groups = list(1:15), method = "recurrent", bootstrap = TRUE, len = 12, R = 100, level = 0.95, interval = 'prediction')
+plot(bf_r)
+lines(ts1, col = 'black', t='l')
+brec_1 <- rmse(ts1[325:336], bf_r$mean)
+brec_1
+bf_v <- forecast(ssa.result_1, groups = list(1:15), method = "vector", bootstrap = TRUE, len = 12, R = 100, level = 0.95, interval = 'prediction')
+plot(bf_v)
+lines(ts1, col = 'black', t='l')
+bvec_1 <- rmse(ts1[325:336], bf_v$mean)
+bvec_1
+```
+
+Ошибка bootstrap прогноза для 1 периода:
+
+Рекуррентный-- 108.92.
+
+Векторный-- 85.11.
+
+Обычные и рекуррентный и векторный прогнозы показали такие же результаты.
+
+Также построены 95%-предсказательные интервалы для обоих прогнозов.
+
+2.  Для двух периодов:
+
+```{r}
+bf_r <- forecast(ssa.result_2, groups = list(1:12), method = "recurrent", bootstrap = TRUE, len = 24, R = 100, level = 0.95, interval = 'prediction')
+plot(bf_r)
+lines(ts1, col = 'black', t='l')
+brec_2 <- rmse(ts1[313:336], bf_r$mean)
+brec_2
+bf_v <- forecast(ssa.result_2, groups = list(1:12), method = "vector", bootstrap = TRUE, len = 24, R = 100, level = 0.95, interval = 'prediction')
+plot(bf_v)
+lines(ts1, col = 'black', t='l')
+bvec_2 <- rmse(ts1[313:336], bf_v$mean)
+bvec_2
+```
+
+Ошибка bootstrap прогноза для 2 периода:
+
+Рекуррентный-- 134.06.
+
+Векторный-- 134.58.
+
+Нет особых различий между векторным и рекуррентным прогнозами.
+
+Обычные и рекуррентный и векторный прогнозы показали такие же результаты.
+
+Также построены 95%-предсказательные интервалы для обоих прогнозов.
+
+## iossa для прогноза
+
+На примере для двух периода:
+
+Плохо отделяется тренд, для исправления этого используем iossa.
+
+```{r}
+g <- list(c(1, 13:15), 2:12)
+
+issa <- iossa(ssa.result_2, nested.group = g)
+
+plot(ssa.result_2, type = "vectors", idx = 1:15)
+plot(issa, type = "vectors", idx = 1:15)
+plot(ssa.result_2, type = "series", groups = 1:15)
+plot(issa, type = "series", groups = 1:15)
+```
+
+Первые 4 собственных вектора, соответствующих компонентам тренда стали более гладкие.
+
+Сравним прогноз тренда до и после.
+
+Для сравнения выделим тренд каким-то другим способом на полных данных (рассмотрим ранее полученные результаты при помощи ssa на полных данных).
+
+До:
+
+```{r}
+bf_r <- forecast(ssa.result_2, groups = list(c(1, 13:15)), method = "recurrent", bootstrap = TRUE, len = 24, R = 100, level = 0.95)
+plot(bf_r)
+lines(ts1, col = 'black', t='l')
+lines(ssa.rec.trend$Trend, col='red', t='l')
+brec_2 <- rmse(ssa.rec.trend$Trend[313:336], bf_r$mean)
+brec_2
+bf_v <- forecast(ssa.result_2, groups = list(c(1, 13:15)), method = "vector", bootstrap = TRUE, len = 24, R = 100, level = 0.95)
+plot(bf_v)
+lines(ts1, col = 'black', t='l')
+lines(ssa.rec.trend$Trend, col='red')
+bvec_2 <- rmse(ssa.rec.trend$Trend[313:336], bf_v$mean)
+bvec_2
+```
+
+После:
+
+```{r}
+bf_r <- forecast(issa, groups = list(1:4), method = "recurrent", bootstrap = TRUE, len = 24, R = 100, level = 0.95)
+plot(bf_r)
+lines(ts1, col = 'black', t='l')
+lines(ssa.rec.trend$Trend, col='red')
+brec_2 <- rmse(ssa.rec.trend$Trend[313:336], bf_r$mean)
+brec_2
+bf_v <- forecast(issa, groups = list(1:4), method = "vector", bootstrap = TRUE, len = 24, R = 100, level = 0.95)
+plot(bf_v)
+lines(ssa.rec.trend$Trend, col='red')
+bvec_2 <- rmse(ssa.rec.trend$Trend[313:336], bf_v$mean)
+bvec_2
+```
+
+Стало хуже :)
+
+На восстановленных рядах 5, 7, 11, 13 виден резкий скачок в конце, а полученный тренд как раз находится значительно ниже тренда, полученного ssa на полных данных. Возможно причина именно в этом.
+
+## Прогноз с точки зрения корней ЛРФ
+
+1.  Для 1 периода:
+
+```{r}
+rank <- 15
+r0 <- reconstruct(ssa.result_1, groups = list(signal = 1:rank))$signal
+n_eig <- list(1:rank)
+l1<- lrr(ssa.result_1, group = n_eig)
+r1 <- Rssa::roots(l1)
+main.roots <- r1[Mod(r1) > 0.999]
+
+l2 <- lrr(ssa.result_1, reverse = TRUE, group = n_eig)
+r2 <- Rssa::roots(l2)
+main.roots <- c(main.roots, 1/r2[Mod(r2) > 0.999])
+main.roots
+par <- parestimate(ssa.result_1, groups = n_eig, method = "esprit")
+par
+```
+
+Тренд описывается четырьмя компонентами; корень, соответствующий линейному тренду имеет модуль больше 1, значит линейный тренд возрастает, а корень, соответствующий гармонике, относящейся к тренду имеет модуль меньше 1, значит колебания затухают. Все корни, соответствующие гармоникам имеют модули больше 1, а значит колебания усиливаются.
+
+Проверим это, спрогнозировав на 20 периодов вперед:
+
+```{r}
+bf_v <- forecast(ssa.result_1, groups = list(1:15), method = "vector", bootstrap = TRUE, len = 12*20, R = 100)
+plot(bf_v)
+```
+
+Тренд возрастает, а колебания увеличиваются.
+
+2.  Для 2 периодов:
+
+```{r}
+rank <- 12
+r0 <- reconstruct(ssa.result_2, groups = list(signal = 1:rank))$signal
+n_eig <- list(1:rank)
+l1<- lrr(ssa.result_2, group = n_eig)
+r1 <- Rssa::roots(l1)
+main.roots <- r1[Mod(r1) > 0.999]
+
+l2 <- lrr(ssa.result_2, reverse = TRUE, group = n_eig)
+r2 <- Rssa::roots(l2)
+main.roots <- c(main.roots, 1/r2[Mod(r2) > 0.999])
+main.roots
+par <- parestimate(ssa.result_2, groups = n_eig, method = "esprit")
+par
+```
+
+Тренд описывается одной компонентой, соответствующий корень имеет модуль больше 1, значит тренд возрастающий. Все корни, соответствующие гармоникам также имеют модули больше 1, а значит колебания усиливаются.
+
+Проверим это, спрогнозировав на 20 периодов вперед:
+
+```{r}
+bf_v <- forecast(ssa.result_2, groups = list(1:12), method = "vector", bootstrap = TRUE, len = 12*20, R = 100)
+plot(bf_v)
+```
+
+Тренд возрастает, а колебания увеличиваются.
+
+# Модификации SSA
+
+## Toeplitz-ssa
+
+Генерируем стационарный ряд + шум.
+
+```{r}
+b <- 12
+n <- 1:120
+ts_mod <- ts(cos(2/b*pi*n) + 2 + rnorm(120,0,0.07))
+plot(ts_mod)
+```
+
+```{r}
+ssa_toep1 <- ssa(ts_mod, L = 60, kind = '1d-ssa')
+ssa_toep2 <- ssa(ts_mod, L = 60, kind = 'toeplitz-ssa')
+plot(ssa_toep1, type = 'vectors', idx = 1:5)
+plot(ssa_toep1, type = 'paired', idx = 2:5)
+plot(ssa_toep1, type = 'series', groups = 1:5)
+plot(ssa_toep1, type = 'series', groups = list(5))
+plot(ssa_toep1, type = 'wcor', groups = 1:5)
+plot(ssa_toep2, type = 'vectors', idx = 1:5)
+plot(ssa_toep2, type = 'paired', idx = 2:5)
+plot(ssa_toep2, type = 'series', groups = 1:5)
+plot(ssa_toep2, type = 'series', groups = list(1:5))
+plot(ssa_toep2, type = 'wcor', groups = 1:5)
+```
+
+Сигнальными компонентами считаем первые 3-- первая компонента- тренд, вторая и третья- косинус.
+
+```{r}
+ssa.rec_toep1 <- reconstruct(ssa_toep1, groups = list(Trend = 1, Seas=c(2:3)))
+ssa.rec_toep2 <- reconstruct(ssa_toep2, groups = list(Trend = 1, Seas=c(2:3)))
+```
+
+Посмотрим насколько восстановленный ряд отличается от модельного ряда.
+
+```{r}
+ssa_signal1 <- ssa.rec_toep1$Trend + ssa.rec_toep1$Seas
+ssa_signal2 <- ssa.rec_toep2$Trend + ssa.rec_toep2$Seas
+rmse(ts_mod, ssa_signal1)
+rmse(ts_mod, ssa_signal2)
+```
+
+Basic-SSA показывает результаты лучше, чем Toeplitz-SSA, уже при таком небольшом уровне шума.
+
+## Двойное центрирование
+
+```{r}
+ssa.res_2center <- ssa(ts1, L=336/2, row.projector = "center", column.projector = "center")
+plot(ssa.res_2center, type = 'vectors', idx = 1:25)
+plot(ssa.res_2center, type = 'paired', idx = 3:25)
+plot(ssa.res_2center, type = 'series', groups = 1:25)
+plot(ssa.res_2center, type = 'series', groups = list(1:25))
+plot(ssa.res_2center, type = 'wcor', groups = 1:25)
+```
+
+Трендом считаем компоненты-- 1, 2, 14, 15, 16, 19, 22; сезонностью-- 3-13, 17, 18, 20, 21.
+
+```{r}
+ssa.rec <- reconstruct(ssa.res_2center, groups = list(Trend = c(1,2,14:16,19,22), Seas=c(3:13,17:18,20:21)))
+plot.ts(ts1, type = 'l')
+lines(ssa.rec$Trend, col='red')
+lines(ssa.rec.trend$Trend, col='green')
+spectrum(residuals(ssa.rec), log='no', method='pgram', detrend=TRUE)
+acf(residuals(ssa.rec))
+```
+
+Сравним тренд, выделеный классическим ssa и ssa с двойным центрированием: на концах заметны отличия, адекватнее тренд описывает классический ssa, возможно, это связано с тем, что данный ряд имеет нелинейный тренд, так как в нем присутствует гармоника с большим периодом.
+
+Остаток похож на красный шум, но для этого пришлось брать большее число компонент, чем при классическом ssa.
+
+# Заполнение пропусков, разладка
+
+## gapfill
+
+Добавим пропуски.
+
+```{r}
+ts_gap <- ts1
+gap <- 193:246
+ts_gap[gap] <- NA
+plot(ts_gap)
+```
+
+Рассмотрим длину окна такую что, вторая часть имеет не ноль векторов вложений.
+
+```{r}
+ssa_gap_res <- ssa(ts_gap, L=72)
+plot(ssa_gap_res, type = 'vectors', idx = 1:20)
+plot(ssa_gap_res, type = 'paired', idx = 2:20)
+plot(ssa_gap_res, type = 'series', groups = 1:20)
+plot(ssa_gap_res, type = 'series', groups = list(1:20))
+plot(ssa_gap_res, type = 'wcor', groups = 1:20)
+```
+
+Результат применения gapfill:
+
+```{r}
+gr <- list(c(1:12, 13, 14, 19, 20))
+g <- gapfill(ssa_gap_res, groups = gr, method = "sequential", 
+             base = "reconstructed")
+plot(ts_gap, col = "black")
+lines(g, col = "red")
+plot(ts1, col = "black")
+lines(ts(g[gap], start = c(2008, 1), frequency = 12), col = "red")
+rmse(g[gap], ts1[gap])
+```
+
+## igapfill
+
+```{r}
+ig <- igapfill(ssa_gap_res, groups = gr, 
+               base = "reconstructed", maxiter = 2000)
+plot(ts_gap, col = "black")
+lines(ig, col = "red")
+plot(ts1, col = "black")
+lines(ts(ig[gap], start = c(2008, 1), frequency = 12), col = "red")
+rmse(ig[gap], ts1[gap])
+```
+
+igapfill c maxiter=2000 показывает результат лучше (с точки зрения rmse), чем gapfill.
+
+## Cadzow
+
+Аппроксимируем исходный ряд рядом конечного ранга:
+
+```{r}
+cadz <- cadzow(ssa.result, rank = 15, tol = 1e-10)
+plot(ts1)
+lines(cadz, col = 'red')
+rmse(ts1, cadz)
+plot(ssa(cadz))
+```
+
+Получили ряд конечного ранга = 15.
+
+## Weights-Cadzow
+
+Рассмотрим вариант с весами, для достижения большей точности.
+
+```{r}
+L <- 336/2
+K <- length(ts1) - L + 1
+alpha <- 0.01
+weights <- vector(len = K)
+weights[1:K] <- alpha
+weights[seq(K, 1, -L)] <- 1
+ssa_cadz_weights <- ssa(ts1, L = L, column.oblique = "identity", 
+           row.oblique = weights)
+cadz_weights <- cadzow(ssa_cadz_weights, rank = 15, maxiter = 10)
+plot(ts1)
+lines(cadz_weights, col = 'red')
+rmse(ts1, cadz_weights)
+plot(ssa(cadz_weights))
+```
+
+rmse меньше по сравнению с обычным Cadzow.
+
+## Оптимальный подбор параметров
+
+```{r, include=FALSE}
+forecast.rmse <- function(x, F.check,
+                         forecast.len = 1, ...) {
+  stopifnot(length(F.check) == forecast.len)
+  f <- forecast(x, h = forecast.len, ...)
+  mean((f$mean - F.check)^2)
+}
+forecast.sliding.rmse <- function(F,
+                              L, ncomp,
+                              forecast.len = 1, 
+                              K.sliding = N %/% 4,
+                              .progress = "none", 
+                              .parallel = FALSE,
+                              ...) {
+  N <- length(F)
+  sliding.len <- N - K.sliding - forecast.len + 1
+  L.max = max(L); L.min = min(L); ncomp.max = max(ncomp)
+  stopifnot(sliding.len > L.max)
+  stopifnot(ncomp.max + 1 < min(L.min, N - L.max + 1))
+  g <- expand.grid(L = L, i = 1:K.sliding)
+  aaply(g, 1,
+        splat(function(L, i) {
+            F.train <- F[seq(from = i, len = sliding.len)]
+            F.check <- F[seq(from = sliding.len + i, 
+                             len = forecast.len)]
+            s <- ssa(F.train, L = L)
+            sapply(ncomp,
+                   function(ncomp) {
+                       res <- forecast.rmse(s, F.check,
+                                           forecast.len = 
+                                             forecast.len,
+                                           groups = 
+                                             list(1:ncomp),
+                                           ...)
+                       names(res) <- as.character(ncomp)
+                       res
+                   })
+        }),
+        .progress = .progress, .parallel = .parallel)
+}
+optim.par <- function(m0) {
+  m <- apply(m0, c(1, 3), mean)
+  mpos <- which(m == min(m), arr.ind = TRUE)
+  L.opt <- Ls[mpos[1]]
+  ncomp.opt <- ncomp[mpos[2]]
+  list(L.opt = L.opt, ncomp.opt = ncomp.opt, m = m)
+}
+```
+
+```{r}
+K.sliding <- 2
+forecast.base.len <- 2*frequency(ts1s)
+base.len <- length(ts1s)
+sliding.len <- base.len - K.sliding - forecast.base.len + 1
+ncomp <- 1:22
+L.min <- 4*frequency(ts1s)
+Ls <- seq(L.min, length(ts1s)/2, by = frequency(ts1s))
+m0 <- forecast.sliding.rmse(ts1s,
+                           K.sliding = K.sliding,
+                           L = Ls, ncomp = ncomp,
+                           method = "recurrent",
+                           forecast.len = forecast.base.len,  
+                           .progress = "none")
+par <- optim.par(m0)
+par$L.opt
+par$ncomp.opt
+par$m
+matplot(Ls, sqrt(par$m), ylab = "", xlab = "Window lengths",
+        type = "l", col = topo.colors(10))
+```
+
+Построим прогноз (векторный и рекуррентный bootstrap) с оптимальными параметрами:
+
+```{r}
+ssa.result_optim <- ssa(ts1s, L=96)
+plot(ssa.result_optim, type = 'vectors', idx = 1:19)
+plot(ssa.result_optim, type = 'paired', idx = 2:19)
+plot(ssa.result_optim, type = 'series', groups = 1:19)
+plot(ssa.result_optim, type = 'series', groups = list(1:19))
+plot(ssa.result_optim, type = 'wcor', groups = 1:19)
+```
+
+```{r}
+bf_r <- forecast(ssa.result_optim, groups = list(1:19), method = "recurrent", bootstrap = TRUE, len = 12, R = 100, level = 0.95, interval = 'prediction')
+plot(bf_r)
+lines(ts1, col = 'black', t='l')
+brec_3 <- rmse(ts1[325:336], bf_r$mean)
+brec_3
+bf_v <- forecast(ssa.result_optim, groups = list(1:19), method = "vector", bootstrap = TRUE, len = 12, R = 100, level = 0.95, interval = 'prediction')
+plot(bf_v)
+lines(ts1, col = 'black', t='l')
+bvec_3 <- rmse(ts1[325:336], bf_v$mean)
+bvec_3
+```
+
+rmse векторного прогноза немного меньше.
+
+## Разладка
+
+Разладка есть в данных (последние два периода).
+
+```{r}
+plot(ts)
+N <- length(ts)
+ssa_full_res <- ssa(ts, L = N/2)
+plot(ssa_full_res, type = 'vectors', idx = 1:20)
+plot(ssa_full_res, type = 'paired', idx = 2:20)
+plot(ssa_full_res, type = 'series', groups = 1:20)
+plot(ssa_full_res, type = 'series', groups = list(1:20))
+plot(ssa_full_res, type = 'wcor', groups = 1:20)
+```
+
+Рассмотрим первые 12 компонент:
+
+```{r}
+rank <- 12
+M <- 120
+L <- M/4
+hm <- hmatr(ts, B = M, T = 36, L = L, neig = rank)
+plot(hm)
+```
+
+На матрице неоднородности видна разладка в последних периодах.
